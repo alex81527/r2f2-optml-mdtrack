@@ -1,0 +1,27 @@
+import os, sys
+sys.path.append("../")
+if 'DISPLAY' not in os.environ:
+    import matplotlib
+    matplotlib.use('Agg')
+import pylab as pl
+import numpy as np
+from common_modules import rf_common
+
+l1 = rf_common.get_lambs(2.4e9, 10e6, 64)
+K = 1
+sep = 0.06
+
+params1 = [[0, 0.5], [1,1], [0.12,0.32], [0.12,0.32]]
+params2 = [[0, 0.625], [1,1], [0.12,0.32], [0.12,0.32]]
+
+ch1 = rf_common.get_chans_from_params(params1, K, sep, l1)
+ch2 = rf_common.get_chans_from_params(params2, K, sep, l1)
+
+pl.subplot(2,1,1)
+pl.plot(np.abs(ch1))
+pl.plot(np.abs(ch2))
+pl.subplot(2,1,2)
+pl.plot(np.angle(ch1))
+pl.plot(np.angle(ch2))
+#pl.plot(np.angle(ch1/ch2))
+pl.show()

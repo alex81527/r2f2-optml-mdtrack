@@ -1,0 +1,132 @@
+import os, sys
+sys.path.append("../")
+
+if not os.environ.has_key('DISPLAY'):
+    import matplotlib
+    matplotlib.use('Agg')
+
+from common_modules import rf_common
+import numpy as np
+import time, keras, sys
+from common_modules import r2f2_helper, r2f2
+import operator, bisect
+
+import pylab as pl
+
+def get_ml_guesses(model, channel):
+    psis = list(np.arange(-1, 1, 0.1))
+    distances = list(np.arange(0, 30, 1))
+    distances.append(distances[-1])
+    psis.append(psis[-1])
+    nrows = len(psis)
+    ncols = len(distances)
+    ch = channel.transpose().ravel()
+    ch = np.concatenate([np.real(ch), np.imag(ch)])
+    pred = model.predict(ch.reshape(1,-1))
+    pred = pred.reshape(nrows, ncols)
+    
+    return pred
+
+
+def get_2D_guess_heatmap(psis, distances, full_exp_dict, h_mat):
+    psi_d_mat = np.zeros([len(psis), len(distances)]).astype(np.complex)
+    i = 0
+    for psi in psis:
+        j = 0
+        for d in distances:
+            key = (d, psi)
+            exp_full = full_exp_dict[key]
+            val = h_mat*exp_full
+            val = np.sum(val)
+            psi_d_mat[i,j] = val
+            j+=1
+        i+=1
+    psi_d_mat = np.abs(psi_d_mat)
+    psi_d_mat = np.square(psi_d_mat)
+    return psi_d_mat
+
+if __name__ == '__main__':
+    cf1 = 2.4e9
+    cf2 = cf1+30e6
+    c = 3e8
+    min_d, max_d = 0, 30.0
+
+    K = 4
+    bw = 10e6
+    nfft = 64
+    l1 = rf_common.get_lambs(cf1, bw, nfft)
+    sep = l1[0]/2
+
+
+    model_src = "nl5_hu250_K4_2400_30m.hdf5"
+    model_src = "nl5_hu250_K4_2400_sigma_1.2.hdf5"
+    model = keras.models.load_model(model_src)
+    
+    window = 10
+    dist_step = 0.5
+    psi_step = 1
+    min_sep = 1
+    distances = np.arange(min_d, max_d, dist_step)
+    for num_paths in [4]:
+        max_num_paths = num_paths+2
+        full_exp_dict = r2f2_helper.precomputer(l1, K, sep, max_d, dist_step, psi_step)
+        for i in range(10):
+            params = rf_common.get_synth_params(num_paths, min_d, max_d-1)
+            print params
+            data_snr = np.random.randint(100,150)/10.0
+            ch_snr = np.random.randint(150,200)/10.0
+
+            ch_l1 = rf_common.get_chans_from_params(params, K, sep, l1)
+            ch_l1 = rf_common.add_noise_array(ch_l1, ch_snr)
+
+            pred_ml = get_ml_guesses(model, ch_l1)
+
+            thetas = np.arange(0,180,psi_step)
+            thetas_rad = thetas*np.pi/180
+            psis = np.cos(thetas_rad)
+            pred_r2f2 = get_2D_guess_heatmap(psis, distances, full_exp_dict, ch_l1)
+            pred_r2f2 = pred_r2f2[::-1, :]
+            
+            pl.figure(figsize=(5,3))
+            pl.imshow(pred_r2f2, aspect="auto")
+            pl.yticks(range(0,len(thetas), len(thetas)/5), list(thetas[::len(thetas)/5]), fontsize="x-large")
+            pl.xticks(range(0,len(distances), len(distances)/5), map(int, list(distances[::len(distances)/5])), fontsize="x-large")
+            pl.ylabel("Angle of arrival, degrees", fontsize="x-large")
+            pl.xlabel("Distance, meters", fontsize="x-large")
+            pl.tight_layout()
+            pl.savefig("r2f2"+str(i)+".png")
+            pl.close()
+            
+            pl.figure(figsize=(5,3))
+            pl.imshow(pred_ml, aspect="auto")
+            thetas = np.arange(0,180,9)
+            pl.yticks(range(0,len(thetas), len(thetas)/5), list(thetas[::len(thetas)/5]), fontsize="x-large")
+            pl.xticks(range(0, 30, 6), fontsize="x-large")
+            pl.ylabel("Angle of arrival, degrees", fontsize="x-large")
+            pl.xlabel("Distance, meters", fontsize="x-large")
+            pl.tight_layout()
+            pl.savefig("nne"+str(i)+".png")
+            pl.close()
+            
+            
+            zer = np.zeros([21,31])
+            thet = np.arange(-1,1,0.1)
+            for j in range(num_paths):
+                d = params[0][j]
+                aoa = params[-1][j]
+                xpos = bisect.bisect_left(range(31),d)
+                ypos = bisect.bisect_left(thet,aoa)
+                zer[ypos, xpos] = params[1][j]
+            pl.figure(figsize=(5,3))
+            pl.imshow(zer, aspect="auto")
+            thetas = np.arange(0,180,9)
+            pl.yticks(range(0,len(thetas), len(thetas)/5), list(thetas[::len(thetas)/5]), fontsize="x-large")
+            pl.xticks(range(0, 30, 6), fontsize="x-large")
+            pl.ylabel("Angle of arrival, degrees", fontsize="x-large")
+            pl.xlabel("Distance, meters", fontsize="x-large")
+            pl.tight_layout()
+            pl.savefig("ideal"+str(i)+".png")
+            pl.close()
+            
+            
+            #pl.show()

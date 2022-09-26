@@ -1,0 +1,17 @@
+function [heatmap] = show_heatmap(H)
+    tofs = 0:0.01:6;
+    coss = -1:0.05:1;
+    for ii = 1:length(coss)
+        for jj = 1:length(tofs)
+            tof_mat = repmat(exp(1j.*2.*pi.*(tofs(jj))./64.*[0:63].'),1,size(H,2));
+            aoa_mat = repmat(exp(1j.*2.*pi.*0.5.*coss(ii).*[0:size(H,2)-1]), size(H,1), 1);
+            heatmap(ii, jj) = abs(sum(sum(H.*tof_mat.*aoa_mat)))^2;
+        end
+    end
+    
+    figure(678); clf;
+    image(heatmap);
+    colormap(jet);
+    colorbar;
+    
+end

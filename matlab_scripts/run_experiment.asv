@@ -1,0 +1,211 @@
+%% initialization, run it once
+clear;
+nodes = wl_initNodes(2)
+ifc_ids = wl_getInterfaceIDs(nodes(1));
+%% node sync
+USE_EXTERNAL_TRIGGER = true;
+USE_AGC        = false;
+ManualRxGainRF = [2 2 2 2];                    % Rx RF Gain in [1:3] (ignored if USE_AGC is true)
+ManualRxGainBB = [15, 17, 16, 15];                   % Rx Baseband Gain in [0:31] (ignored if USE_AGC is true)
+RF_TX          = ifc_ids.RF_A;                    % Transmit RF interface
+RF_TX_VEC      = ifc_ids.RF_A;
+RF_RX          = ifc_ids.RF_ALL;                    % Receive RF interface
+RF_RX_VEC      = ifc_ids.RF_ALL_VEC;                 % Vector version of transmit RF interface
+BAND           = 2.4;
+CHANNEL        = 1;
+% siso ofdm
+USE_WARPLAB_TXRX        = 1;           % Enable WARPLab-in-the-loop (otherwise sim-only)
+TX_SCALE                = 1.0;          % Scale for Tx waveform ([0:1])
+SC_IND_PILOTS           = [8 22 44 58];                           % Pilot subcarrier indices
+SC_IND_DATA             = [2:7 9:21 23:27 39:43 45:57 59:64];     % Data subcarrier indices
+N_SC                    = 64;                                     % Number of subcarriers
+CP_LEN                  = 16;                                     % Cyclic prefix length
+INTERP_RATE             = 2;                                      % Interpolation rate (must be 2)
+FFT_OFFSET                    = 1;           % Number of CP samples to use in FFT (on average)
+LTS_CORR_THRESH               = 0.8;         % Normalized threshold for LTS correlation
+DO_APPLY_CFO_CORRECTION       = 1;           % Enable CFO estimation/correction
+DO_APPLY_PHASE_ERR_CORRECTION = 1;           % Enable Residual CFO estimation/correction
+DO_APPLY_SFO_CORRECTION       = 1;           % Enable SFO estimation/correction
+DECIMATE_RATE                 = INTERP_RATE;
+MAX_TX_LEN              = 2^20;        % Maximum number of samples to use for this experiment
+
+sts_f = zeros(1,64);
+    sts_f(1:27) = [0 0 0 0 -1-1i 0 0 0 -1-1i 0 0 0 1+1i 0 0 0 1+1i 0 0 0 1+1i 0 0 0 1+1i 0 0];
+    sts_f(39:64) = [0 0 1+1i 0 0 0 -1-1i 0 0 0 1+1i 0 0 0 -1-1i 0 0 0 -1-1i 0 0 0 1+1i 0 0 0];
+    sts_t = ifft(sqrt(13/6).*sts_f, 64);
+    sts_t = sts_t(1:16);
+lts_f = [0 1 -1 -1 1 1 -1 1 -1 1 -1 -1 -1 -1 -1 1 1 -1 -1 1 -1 1 -1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 1 1 -1 -1 1 1 -1 1 -1 1 1 1 1 1 1 -1 -1 1 1 -1 1 -1 1 1 1 1];
+lts_t = ifft(lts_f, 64);
+preamble = [repmat(sts_t, 1, 30)  lts_t(33:64) lts_t lts_t];
+
+for iter = 1:1
+    phase_diff = zeros(2, length(RF_RX_VEC));
+    for i = 1: size(phase_diff, 1)
+        phase_diff(i, :) = wl_example_siso_txrx_nodeSync(nodes, ifc_ids, USE_EXTERNAL_TRIGGER, USE_AGC, ...
+            ManualRxGainRF, ManualRxGainBB, RF_TX, RF_RX, RF_RX_VEC, RF_TX_VEC, BAND, CHANNEL);
+    end
+
+    phase_diff;
+%     pause(1)
+end
+%% 1. calibration between RF chains, need to connect them through wires
+PHASE_CALIBRATION = [0 0 0 0];
+H = wl_example_siso_ofdm_txrx(preamble, nodes, ifc_ids, USE_EXTERNAL_TRIGGER, USE_AGC, ...
+        ManualRxGainRF, ManualRxGainBB, RF_TX, RF_RX, RF_RX_VEC, RF_TX_VEC, BAND, CHANNEL, ...
+        USE_WARPLAB_TXRX, TX_SCALE, SC_IND_PILOTS, SC_IND_DATA, N_SC, CP_LEN, INTERP_RATE, FFT_OFFSET, ...
+        LTS_CORR_THRESH, DO_APPLY_CFO_CORRECTION, DO_APPLY_PHASE_ERR_CORRECTION, DO_APPLY_SFO_CORRECTION, ...
+        MAX_TX_LEN, PHASE_CALIBRATION);
+
+INTER_RF_CALIBRATION = get_calibration_value(H);
+save 'INTER_RF_CALIBRATION.mat' INTER_RF_CALIBRATION
+calibrated_H = H .* INTER_RF_CALIBRATION;
+avg_phase_diff = get_calibration_result(calibrated_H);
+save calibrated_H.mat calibrated_H
+
+figure(2); clf;
+subplot(3,1,1);
+plot(1:52, unwrap(angle(nonzeros(H(:, 1))))); hold on;
+plot(1:52, unwrap(angle(nonzeros(H(:, 2)))), 'g');
+plot(1:52, unwrap(angle(nonzeros(H(:, 3)))), 'c');
+plot(1:52, unwrap(angle(nonzeros(H(:, 4)))), 'r');
+legend('RFA', 'RFB', 'RFC', 'RFD');
+ylabel('radian');
+title('phase respoonse');
+subplot(3,1,2);
+plot(1:52, unwrap(angle(nonzeros(H(:, 2)))) - unwrap(angle(nonzeros(H(:, 1)))), 'g'); hold on;
+plot(1:52, unwrap(angle(nonzeros(H(:, 3)))) - unwrap(angle(nonzeros(H(:, 1)))), 'c'); hold on;
+plot(1:52, unwrap(angle(nonzeros(H(:, 4)))) - unwrap(angle(nonzeros(H(:, 1)))), 'r'); hold on;
+legend('RFB-RFA', 'RFC-RFA', 'RFD-RFA');
+title('phase difference to RFA');
+subplot(3,1,3);
+plot(1:52, unwrap(angle(nonzeros(calibrated_H(:, 1))))); hold on;
+plot(1:52, unwrap(angle(nonzeros(calibrated_H(:, 2)))), 'g');
+plot(1:52, unwrap(angle(nonzeros(calibrated_H(:, 3)))), 'c');
+plot(1:52, unwrap(angle(nonzeros(calibrated_H(:, 4)))), 'r');
+legend('RFA', 'RFB', 'RFC', 'RFD');
+ylabel('radian');
+title('calibrated phase respoonse');
+%% 2. TOF calibration for RFA
+for ii=1:10
+    PHASE_CALIBRATION = [0 0 0 0];
+    H = wl_example_siso_ofdm_txrx(preamble, nodes, ifc_ids, USE_EXTERNAL_TRIGGER, USE_AGC, ...
+            ManualRxGainRF, ManualRxGainBB, RF_TX, RF_RX, RF_RX_VEC, RF_TX_VEC, BAND, CHANNEL, ...
+            USE_WARPLAB_TXRX, TX_SCALE, SC_IND_PILOTS, SC_IND_DATA, N_SC, CP_LEN, INTERP_RATE, FFT_OFFSET, ...
+            LTS_CORR_THRESH, DO_APPLY_CFO_CORRECTION, DO_APPLY_PHASE_ERR_CORRECTION, DO_APPLY_SFO_CORRECTION, ...
+            MAX_TX_LEN, PHASE_CALIBRATION);
+    
+    avg_H(ii, :) = H(:,1).';
+end
+
+tof_correction = exp(-1j.*angle(mean(avg_H).'));
+for ii=1:size(avg_H,1)
+    H = avg_H(ii,:).';
+    figure(3); % clf;
+    subplot(2,1,1);
+    plot(unwrap(angle(nonzeros(H(:,1))))); hold on;
+    subplot(2,1,2);
+    for tof=1:500
+        cor(tof) = abs(sum(H(:,1).*exp(1j.*2.*pi.*(tof/100)./64.*[0:63].')))^2;
+    end
+    % plot(db(nonzeros(H(:,1))));
+    plot(cor); hold on;
+    [M, I] = max(cor);
+%     ground_truth_distance = 2.366;
+%     fprintf('Measured tof %.2f ns, at %.3f meters away tof should be %.2f ns.\n', I*0.5, ground_truth_distance, ...
+%         ground_truth_distance/3e8*1e9);
+%     fprintf('Extra tof introduced by the RF chain: %.3f ns, wihch is %.3f sample delay.\n', ...
+%         I*0.5 - ground_truth_distance/3e8*1e9, (I*0.5 - ground_truth_distance/3e8*1e9)/50);
+
+    % RFA chain introduces ~0.989 extra sample delay (20 MHz sampling)
+    % samp_delay = (I*0.5 - ground_truth_distance/3e8*1e9)/50;
+    % tof_correction = exp(1j.*2.*pi.*(samp_delay)./64.*[0:63].');
+    % tof_correction = exp(-1j.*angle(H(:,1)));
+    % RFA_TOF_CALIBRATION = repmat(tof_correction, 1, 4);
+    % save 'RFA_TOF_CALIBRATION.mat' RFA_TOF_CALIBRATION
+
+    figure(4); % clf;
+    subplot(3,1,1);
+    plot(unwrap(angle(nonzeros(H(:,1))))); hold on;
+    subplot(3,1,2);
+    plot(unwrap(angle(nonzeros(H(:,1).*exp(1j.*2.*pi.*(I*0.5/50)./64.*[0:63].'))))); hold on;
+    subplot(3,1,3);
+    plot(unwrap(angle(nonzeros(H(:,1).*tof_correction)))); hold on;
+end
+
+RFA_TOF_CALIBRATION = repmat(tof_correction, 1, 4);
+save 'RFA_TOF_CALIBRATION.mat' RFA_TOF_CALIBRATION
+%% collect experiment data
+
+% H = wl_example_siso_ofdm_txrx(zeros(1,5000), nodes, ifc_ids, USE_EXTERNAL_TRIGGER, USE_AGC, ...
+%         ManualRxGainRF, ManualRxGainBB, RF_TX, RF_RX, RF_RX_VEC, RF_TX_VEC, BAND, CHANNEL, ...
+%         USE_WARPLAB_TXRX, TX_SCALE, SC_IND_PILOTS, SC_IND_DATA, N_SC, CP_LEN, INTERP_RATE, FFT_OFFSET, ...
+%         LTS_CORR_THRESH, DO_APPLY_CFO_CORRECTION, DO_APPLY_PHASE_ERR_CORRECTION, DO_APPLY_SFO_CORRECTION, ...
+%         MAX_TX_LEN, PHASE_CALIBRATION);
+% noise = get_per_tone_noise()
+
+PHASE_CALIBRATION = [0 0 0 0];
+H = wl_example_siso_ofdm_txrx(preamble, nodes, ifc_ids, USE_EXTERNAL_TRIGGER, USE_AGC, ...
+        ManualRxGainRF, ManualRxGainBB, RF_TX, RF_RX, RF_RX_VEC, RF_TX_VEC, BAND, CHANNEL, ...
+        USE_WARPLAB_TXRX, TX_SCALE, SC_IND_PILOTS, SC_IND_DATA, N_SC, CP_LEN, INTERP_RATE, FFT_OFFSET, ...
+        LTS_CORR_THRESH, DO_APPLY_CFO_CORRECTION, DO_APPLY_PHASE_ERR_CORRECTION, DO_APPLY_SFO_CORRECTION, ...
+        MAX_TX_LEN, PHASE_CALIBRATION);
+
+load('INTER_RF_CALIBRATION.mat');
+load('RFA_TOF_CALIBRATION.mat');
+calibrated_H = H .* INTER_RF_CALIBRATION(:, 1:size(H,2)).* RFA_TOF_CALIBRATION(:, 1:size(H,2));
+save calibrated_H.mat calibrated_H
+save H.mat H
+
+figure(4); clf; 
+set(gcf, 'units', 'inches', 'position', [1 1 10 6]);
+subplot(2,3,1);
+plot(1:52, db(nonzeros(H(:, 1)))); hold on;
+plot(1:52, db(nonzeros(H(:, 2))), 'g');
+plot(1:52, db(nonzeros(H(:, 3))), 'c');
+plot(1:52, db(nonzeros(H(:, 4))), 'r');
+legend('RFA', 'RFB', 'RFC', 'RFD');
+ylabel('dB');
+title('uncalibrated mag respoonse');
+subplot(2,3,4);
+plot(1:52, unwrap(angle(nonzeros(H(:, 1))))); hold on;
+plot(1:52, unwrap(angle(nonzeros(H(:, 2)))), 'g');
+plot(1:52, unwrap(angle(nonzeros(H(:, 3)))), 'c');
+plot(1:52, unwrap(angle(nonzeros(H(:, 4)))), 'r');
+legend('RFA', 'RFB', 'RFC', 'RFD');
+ylabel('radian');
+title('uncalibrated phase respoonse');
+subplot(2,3,2);
+plot(1:52, db(nonzeros(calibrated_H(:, 1)))); hold on;
+plot(1:52, db(nonzeros(calibrated_H(:, 2))), 'g');
+plot(1:52, db(nonzeros(calibrated_H(:, 3))), 'c');
+plot(1:52, db(nonzeros(calibrated_H(:, 4))), 'r');
+legend('RFA', 'RFB', 'RFC', 'RFD');
+ylabel('dB');
+title('calibrated mag respoonse');
+subplot(2,3,5);
+plot(1:52, unwrap(angle(nonzeros(calibrated_H(:, 1))))); hold on;
+plot(1:52, unwrap(angle(nonzeros(calibrated_H(:, 2)))), 'g');
+plot(1:52, unwrap(angle(nonzeros(calibrated_H(:, 3)))), 'c');
+plot(1:52, unwrap(angle(nonzeros(calibrated_H(:, 4)))), 'r');
+legend('RFA', 'RFB', 'RFC', 'RFD');
+ylabel('radian');
+title('calibrated phase respoonse');
+subplot(2,3,3);
+% plot(1:52, db(nonzeros(calibrated_H(:, 1)))); hold on;
+plot(1:52, db(nonzeros(INTER_RF_CALIBRATION(:, 2))), 'g'); hold on;
+plot(1:52, db(nonzeros(INTER_RF_CALIBRATION(:, 3))), 'c');
+plot(1:52, db(nonzeros(INTER_RF_CALIBRATION(:, 4))), 'r');
+legend('RFB', 'RFC', 'RFD');
+ylabel('dB');
+title('mag calibration values');
+subplot(2,3,6);
+% plot(1:52, unwrap(angle(nonzeros(calibrated_H(:, 1))))); hold on;
+plot(1:52, unwrap(angle(nonzeros(INTER_RF_CALIBRATION(:, 2)))), 'g'); hold on;
+plot(1:52, unwrap(angle(nonzeros(INTER_RF_CALIBRATION(:, 3)))), 'c');
+plot(1:52, unwrap(angle(nonzeros(INTER_RF_CALIBRATION(:, 4)))), 'r');
+legend('RFB', 'RFC', 'RFD');
+ylabel('radian');
+title('phase calibration values');
+
+show_heatmap(calibrated_H);
+% show_heatmap(H);

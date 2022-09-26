@@ -1,0 +1,158 @@
+import os, sys
+sys.path.append("../")
+
+if not os.environ.has_key('DISPLAY'):
+    import matplotlib
+    matplotlib.use('Agg')
+
+from common_modules import rf_common
+import numpy as np
+import time, keras, sys
+from common_modules import r2f2_helper, r2f2
+import operator
+import json
+import pylab as pl
+from mdtrack import md_core
+
+def get_synth_params_sep_aoa_dist(n_paths, lo, hi, dist_sep, aoa_sep):
+    '''
+    using random values for the 4-tuples for
+    each path
+    dist_sep in meters
+    aoa_sep in degrees
+    '''  
+    np.random.seed()
+    
+    while True:
+        d_ns = np.sort(np.random.rand(n_paths)*hi)
+        d_ns[0] = max(d_ns[0],0.5)
+        regen = False
+        for i in range(1, n_paths):
+            if d_ns[i]-d_ns[i-1]<dist_sep:
+                regen = True
+                break
+        if not regen:
+            break
+    
+    a_ns = np.random.rand(n_paths)
+    a_ns = a_ns/np.sum(a_ns)
+    a_ns = np.where(a_ns<0.02, 0.02, a_ns)
+    a_ns = a_ns/np.sum(a_ns)
+
+    phi_ns = np.random.rand(n_paths)
+    
+    while True:
+        psi_ns = np.sort(np.random.rand(n_paths)*180)        ### 0 to 180 range
+        regen = False
+        for i in range(1, n_paths):
+            if psi_ns[i]-psi_ns[i-1]<aoa_sep:
+                regen = True
+                break
+        if not regen:
+            np.random.shuffle(psi_ns)
+            psi_ns = np.cos(psi_ns/180*np.pi)
+            break
+
+    return d_ns, a_ns, phi_ns, psi_ns
+
+def get_ml_guesses(model, channel, psi_step=0.1, max_d=100, d_step=4):
+    psis = np.arange(-1, 1, psi_step)
+    distances = np.arange(0, max_d, d_step)
+    nrows = len(psis)
+    ncols = len(distances)
+    ch = channel.transpose().ravel()
+    ch = np.concatenate([np.real(ch), np.imag(ch)])
+    pred = model.predict(ch.reshape(1,-1))
+    pred = pred.reshape(nrows, ncols)
+    
+    p_d_psi = r2f2_helper.get_peaks(pred, distances, psis, show_plots=False)
+    
+    ####sort guesses by "probability"
+    p_d_psi = sorted(p_d_psi.items(), key=operator.itemgetter(1), reverse=True)
+    p_d_psi = [k for k,v in p_d_psi]
+    temp = []
+    map(temp.extend, p_d_psi)
+    p_d_psi = temp
+    
+    return p_d_psi
+
+if __name__ == '__main__':
+    cf1 = 2.412e9
+    cf2 = cf1+30e6
+    c = 3e8
+    min_d, max_d = 0, 100.0
+
+    K = 4
+    K2 = K
+    bw = 20e6
+    nfft = 64
+    l1 = rf_common.get_lambs(cf1, bw, nfft)
+    l2 = rf_common.get_lambs(cf2, bw, nfft)
+    sep = l1[0]/2
+    d_sep = 8
+    distances = np.arange(min_d, max_d, d_sep)
+
+    name = 'cf2.41_d100_dsep8_dstep4_aoasep0_psistep0.10_bw20_K4_2Dconv1.0_hu512_hl3'
+    with open(name+'_model.json') as f:
+        data = json.load(f)
+    model = keras.models.model_from_json(data)
+    model.load_weights(name+'_weights.h5')
+    
+    ############################################################
+    # md track parameters 
+    LTS = np.ones(64)
+    aoa_step = 0.02 # rad
+    tof_step = 0.5e-9 
+    tof_max = 334e-9 # for dist up to 100m
+    aoa_range = np.arange(0,np.pi,aoa_step)
+    tof_range = np.arange(0,tof_max,tof_step)
+    ant_sp = 3e8/cf1/2
+    # precompute aoa matrix
+    aoa_matrix = [ np.exp(1j*2*np.pi*ant_sp*np.arange(K)*np.cos(aoa_rad)/l1.reshape(-1,1)) for aoa_rad in aoa_range ]
+    # precompute aod matrix 
+    aod_matrix = np.exp(1j*2*np.pi*ant_sp*np.arange(K)*np.cos(np.pi/2)/l1.reshape(-1,1))
+    # precompute delayed LTS_T for correlation
+    U = [ np.fft.ifft(LTS*np.exp(-1j*2*np.pi*tof*3e8/l1)) for tof in tof_range]
+    ############################################################
+    
+    for num_paths in [4, 3, 2]:
+        max_num_paths = num_paths+2
+        full_exp_dict = r2f2_helper.precomputer(l1, K, sep, max_d, d_step=1, psi_step=1)
+        for i in range(20):
+            # params = rf_common.get_synth_params_sep(num_paths, min_d, max_d-1, d_sep)
+            params = get_synth_params_sep_aoa_dist(num_paths, min_d, max_d, dist_sep=8, aoa_sep=0)
+            ii=np.argmin(params[0])
+            xx=params[0][ii]*np.exp(1j*np.arccos(params[3][ii]))
+            # print np.round(params[0][ii],2), np.arccos(params[3][ii])/np.pi*180
+            #print params[-1]
+            data_snr = np.random.randint(200,250)/10.0
+            ch_snr = data_snr #np.random`.randint(150,200)/10.0
+
+            ch_l1 = rf_common.get_chans_from_params(params, K, sep, l1)
+            ch_l1 = rf_common.add_noise_array(ch_l1, ch_snr)
+
+            ch_l2 = rf_common.get_chans_from_params(params, K2, sep, l2)
+
+            for meth in ["nnde", "r2f2"]:
+                t = time.time()
+                if meth == "nnde":
+                    initial_guesses = get_ml_guesses(model, ch_l1, psi_step=0.1, max_d=100, d_step=4)
+                    best_sol, reason = r2f2.r2f2_solver_fixed_init(ch_l1, l1, sep, max_d, initial_guesses, max_num_paths)
+                else:
+                    initial_guesses = r2f2_helper.get_initial_guesses(l1, K, sep, ch_l1, full_exp_dict, max_d, psi_step=1, dist_step=1, show_plots=False)
+                    best_sol, reason = r2f2.r2f2_solver(ch_l1, l1, sep, max_d, initial_guesses, max_num_paths)
+
+                d_ns = best_sol[0::2]
+                psi_ns = best_sol[1::2]
+
+                param_guesses = r2f2.get_full_params_method3(d_ns, psi_ns, K, sep, l1, ch_l1)
+
+                ch_l2_guess = rf_common.get_chans_from_params(param_guesses, K2, sep, l2)
+
+                t = round(time.time()-t,2)
+                jj=np.argmin(param_guesses[0])
+                yy=param_guesses[0][jj]*np.exp(1j*np.arccos(param_guesses[3][jj]))
+                print meth+"-beam1:", t, K2, num_paths, len(d_ns), ch_snr, rf_common.beam_eval(ch_l2, ch_l2_guess, 0.001, data_snr), np.abs(yy-xx)
+                # print np.round(param_guesses[0][jj],2), np.arccos(param_guesses[3][jj])/np.pi*180
+                # print 'localization error (meter):', np.abs(yy-xx)
+                sys.stdout.flush()

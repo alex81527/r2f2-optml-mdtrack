@@ -1,0 +1,141 @@
+import os, sys
+sys.path.append("../")
+if not os.environ.has_key('DISPLAY'):
+    import matplotlib
+    matplotlib.use('Agg')
+import pylab as pl
+import numpy as np
+from common_modules import ml_core, rf_common, dataset_gen, sparse_op, plotting
+import keras
+import copy
+from keras.optimizers import Adam, RMSprop, SGD
+import restricted_chans
+
+def fit_pred_fcnn(X, targets, params_list, psis, distances, sigma, h_units, num_h_layers, name="", fname=""):
+    in_dim = X.shape[1]
+    callback_list = ml_core.get_callbacks(0.01, name, 50, 0.02)
+    
+    nrows = len(psis)
+    ncols = len(distances)
+    out_dim = (ncols+1)*(nrows+1)
+    
+    activation = "elu"
+    optimizer = "adam"
+    loss_fn = "mae"
+    batch_size = 256
+    num_epochs = 550
+    num_chans = X.shape[0]
+    steps_per_epoch = num_chans/batch_size
+    te_index = int(0.9*X.shape[0])
+    
+    model = ml_core.get_model(in_dim, (nrows+1, ncols+1), h_units, num_h_layers, activation)    
+    model.compile(optimizer, loss_fn, metrics=[loss_fn])
+    keras.utils.print_summary(model)
+    history = model.fit_generator(
+        sparse_op.nn_batch_generator_2d(X[:te_index], targets[:te_index], batch_size, sigma, nrows, ncols),
+        steps_per_epoch,
+        epochs=num_epochs, 
+        verbose=2,
+        validation_data=sparse_op.nn_batch_generator_2d(X[te_index:], targets[te_index:], batch_size, sigma, nrows, ncols),
+        validation_steps=1,
+        #validation_split=0.1,
+        callbacks = callback_list
+        )
+    return model
+
+
+if __name__ == '__main__':
+    debug = False
+    if len(sys.argv) == 2:
+        num_chans = 20
+        debug = True
+    else:
+        num_chans = 150000
+        
+    #### channel parameters
+    min_d, max_d = 0, 30
+    d_step = 1
+
+    for max_d, d_step in [(210,7)]:
+        n_cores = 6
+        psi_step = 0.1
+        lowest_amp = 0.05
+        distances = np.arange(min_d, max_d, d_step)
+        psis = np.arange(-1, 1, psi_step)
+        min_n_paths = 1
+        max_n_paths = 6
+        d_sep = 15
+        K = 4
+    
+        params_list = dataset_gen.get_params_multi_proc(num_chans, max_n_paths, max_d, n_cores, min_d, min_n_paths, d_sep)
+    
+        targets = sparse_op.get_2d_sparse_target(params_list, distances, psis, lowest_amp)
+        ncols = len(distances)
+        nrows = len(psis)
+        sigma = [1.0, 1.0]
+        
+        for cf in [2.4e9]:
+            norm = False
+            bw = 10e6
+            nfft = 64
+            l1 = rf_common.get_lambs(cf, bw, nfft)
+            sep = l1[0]/2
+            
+            X = dataset_gen.get_array_chans_multi_proc(l1, K, sep, params_list, n_cores, norm)
+            print "K=", K," Xshape:",X.shape
+            X = X+np.random.randn(X.shape[0], X.shape[1])*0.005 + 0.005j*np.random.randn(X.shape[0], X.shape[1])
+            X = dataset_gen.to_reals(X)
+            
+            Y_pred = []
+            for x, y in sparse_op.nn_batch_generator_2d(X[-20:], targets[-20:], 1, sigma, nrows, ncols):
+                Y_pred.append(y)
+                if len(Y_pred)>20:
+                    break
+            if K == 4:
+                plotting.plot_2D_decompose_preds(params_list[-20:], Y_pred, distances, psis)
+                pl.savefig( str(K)+"_"+str(max_d)+"m.png")
+                pl.close()
+            
+            if not debug:
+                for h_units, num_h_layers in [(50,10)]:
+                    name = "nl"+str(num_h_layers)+"_hu"+str(h_units)+"_K"+str(K)+"_"+str(int(cf/1e6))+"_sigma_"+str(sigma[0])+"_"+str(max_d)+"m_step"+str(d_step)
+                    print name
+                    model = fit_pred_fcnn(X, targets, params_list, psis, distances, sigma, h_units, num_h_layers, name+".hdf5")
+                    keras.backend.clear_session()
+            
+        
+        if not debug:    
+            params_list = params_list[-20:]
+            targets = targets[-20:]
+            
+            for cf in [2.4e9]:
+                norm = False
+                bw = 10e6
+                nfft = 64
+                l1 = rf_common.get_lambs(cf, bw, nfft)
+                sep = l1[0]/2
+                
+                X = dataset_gen.get_array_chans_multi_proc(l1, K, sep, params_list, n_cores, norm)
+                print "K=", K," Xshape:",X.shape
+                X = X+np.random.randn(X.shape[0], X.shape[1])*0.005 + 0.005j*np.random.randn(X.shape[0], X.shape[1])
+                X = dataset_gen.to_reals(X)
+            
+                Y_pred = []
+                for x, y in sparse_op.nn_batch_generator_2d(X, targets, 1, sigma, nrows, ncols):
+                    Y_pred.append(y)
+                    if len(Y_pred)>20:
+                        break
+                if K == 4:
+                    plotting.plot_2D_decompose_preds(params_list, Y_pred, distances, psis)
+                    pl.savefig( str(K)+"_"+str(max_d)+"m.png")
+                    pl.close()
+                if not debug:
+                    for h_units, num_h_layers in [(100,3), (100,10), (50,3), (50,10)]:
+                        name = "nl"+str(num_h_layers)+"_hu"+str(h_units)+"_K"+str(K)+"_"+str(int(cf/1e6))+"_sigma_"+str(sigma[0])+"_"+str(max_d)+"m_step"+str(d_step)
+                        print name
+                        model = keras.models.load_model(name+".hdf5")
+                        Y_pred = model.predict(X)
+                        plotting.plot_2D_decompose_preds(params_list, Y_pred, distances, psis)
+                        pl.savefig(name+"_"+str(max_d)+"m.png")
+                        pl.close()
+                        keras.backend.clear_session()
